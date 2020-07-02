@@ -1,0 +1,435 @@
+---
+title: "Tourist Classification Using TripAdvisor Review Meta-data"
+author: "Michael Najarro"
+date: "6/12/2020"
+output: html_document
+---
+# *Intoduction*
+Online customer review data has important consequences to the hotel and hospitality indiustry, as an additional source of information that customers can consider as an additional source of information that traditional advertisement cannot provide. Customer reviews can decribe in greater detail the pros and cons of a hotel with respect to time of year. consequently, customer review information supplies additional, and argueably more truthful advertisement for hotel. 
+
+Moro, Rita, & Coelho (2017) studied the intersection of user review data, hotel amenity information, and user review meta data on 21 Las Vegas strip hotels as way to predict and verify customer's personal star-rating of a hotel in which they stayed, and how both the given information and the ranking produced a comparable rating to those of industry-ranked measures.
+
+The authors were attempting to understand how hotel ammenities, tourist review data about a particular hotel stay, and the reviwer's profile information could be used to predict the reviwer's star ranking of the hotel they stayed at, and how that ranking matched with official star ratings given by actual hotel reviewers.
+
+# *Objective*
+Here I reuse their data for a different purpose: to classify the type of tourist based on the metad data provided in each user's review of their stay at a hotel along with hotel amenity information.
+
+The objective of this report is to be able to classify whether a particular tourist (response variable 'type') belongs to any one of five tourist classifications of Business, Couples, Families, Friends, Solo, based on hotel amenity information, a trip advisor reviwer's information about the hotel, and the TripAdvisor's review rankings for that reviewer (meta data related to how popular the user's reviews have helped other reviewers, total nubmer of reviews, and number of hotel reviews) Here I use a random forest and decision tree based approaches.
+
+The justification for classification can provide better insights to better understand which types of hotels better suite particular tourists and their reasons for visiting Las Vegas.
+
+# *Data manipulation*
+
+## Step 1: Import data 
+
+'urdr' stands for user review data raw.
+
+```{r}
+urdr = read.csv( file = "LasVegasTripAdvisorReviews-Data.csv", header = TRUE)
+```
+
+
+## Step 2: Assess the data and the response variable 
+
+```{r}
+#2.a) identify the column names of the data
+names(urdr)
+
+# 2.b) assess the and frequency counts of traveler types
+table(urdr$Traveler.type)  
+
+#str(urdr)
+```
+
+
+## Step 3: remove unecessary columns
+
+I exclude the following columns from this analyusis:
+
+    1. review month
+    
+    2. review day
+    
+    3. user country
+    
+    4. user continent
+    
+I exclude these four variables because I am interested in data that relates either directly to hotel amenities, the content of tourist's review about the hotel they stayed at, or the trip advisor's meta data about the reviwers rankings as a reviewer.
+
+```{r}
+urdr = urdr[,-c(1,17,19,20)]
+```
+
+
+## step 4: identify the hotels
+```{r}
+unique(urdr$Hotel.name)
+```
+
+
+## Step 5: Add extra column that is the distnace of each hotel to the Las Vegas Convention Center
+```{r}
+#5.a) create an empty column for distance to lvcc
+urdr$Distance.to.LVCC = 0
+is.numeric(urdr$Distance.to.LVCC)
+
+#5.b) enter the distances
+urdr[(1:24), 17] = 2
+urdr[(25:48), 17] = 2
+urdr[(49:72), 17] = 1
+urdr[(73:96), 17] = 1
+urdr[(96:119), 17] = 4
+urdr[(120:143), 17] = 1
+urdr[(144:168), 17] = 1 #7
+urdr[(169:192), 17] = 3
+urdr[(193:216), 17] = 4
+urdr[(217:240), 17] = 2
+urdr[(241:264), 17] = 3
+urdr[(265:288), 17] = 2 #12
+urdr[(288:384), 17] = 2 #13-16
+urdr[(385:408), 17] = 3 #17
+urdr[(409:432), 17] = 1 #18
+urdr[(433:456), 17] = 2 #19
+urdr[(456:504), 17] = 1 #20-#21
+```
+
+
+## Step 6: Create a new column for the row number of each row
+```{r}
+urdr$review.number = c(1:nrow(urdr))
+```
+
+## Step 7: create a column where you convert your hotel names to a numeric equivalent
+
+The reason I do this is because the hotel name is a column of type factor. With 21 levels within the column, over fitting will occur.
+
+```{r}
+#7.a) Sort the data by hotel names, alphabetically
+urdr = urdr[order(urdr$Hotel.name), ]
+
+#7.b) create a new column of the hotels as factor levels
+urdr$hotel.count = as.numeric(urdr$Hotel.name)
+
+# 7.c) for a future reference, store the hotel name and hotel count
+# in a seperate data frame
+hotel <- cbind.data.frame(urdr$Hotel.name, urdr$hotel.count)
+
+#7.d) toss the hotel name from urdr and rename hotel count
+urdr <- urdr[,-13]
+colnames(urdr)[17] <- "hotel"
+```
+
+
+## Step 8: Check for NAs within the data, especially in the response variable
+
+There to be unusual NAs within the columns number of rooms and member years.
+
+```{r}
+#8.a) get a wide scope of where the NAs are
+library(Amelia)
+missmap(urdr)
+```
+
+We see that there are 96 rows that are missing NAs for member years and number of rooms. These 96 rows have NAs for both columns. We also see that there is one individual who has an unusual value for the membership years on TripAdvisor: -1806.
+
+```{r}
+#8.b) count the number of NAs
+table(is.na(urdr$Member.years))
+table(is.na(urdr$Nr..rooms))
+
+# if a row has NA for member years, are they also missing for #rooms?
+which(is.na(urdr$Nr..rooms) & is.na(urdr$Member.years))
+
+#8.c) count the number of unique values per column to identify any 
+# weird values
+table(unique(urdr$Member.years))
+table(unique(urdr$Nr..rooms))
+```
+
+
+## Step 9: Deal with the NAs
+
+NAs are missing for rows where the hotel was 7,8, 12 and 20. These nubmers equate to the Hilton Grand Vacations on the Boulevard, Marriott's Grand Chateau,The Cromwell, and the club Wyndham Grand Desert.
+
+research on the hotel indicates that the Cromwell(12) has 188 rooms, the marriott Grand Chateu(8) has 643 (source: wikipedia), the Hilton Grand Vacation(7) has 1228 rooms (expedia.com), and the Wyndham Grand Desert has 787 rooms (expedia.com).
+
+For the member year NAs, I will insert the average number of memeber years.
+
+```{r}
+#9.a) calculate the mean of the member years, excluding nas and -1806
+f <- urdr$Member.years[-364]
+round(mean(f, na.rm =TRUE), digits = 0)
+
+# 9.b) change out the weird member year from -1806 to f, which is 4.
+# reorder the columns back to their original order first
+urdr = urdr[order(urdr$hotel), ]
+which(urdr$Member.years == -1806)
+urdr$Member.years[which(urdr$Member.years == -1806)] <- 4
+
+#9.c) fill in the NAs within the average membership year
+urdr$Member.years[which(is.na(urdr$Member.years))] <- round(mean(urdr$Member.years, na.rm=TRUE), digits = 0)
+
+#9.d) now you need to fill in the rooms for each hotel
+urdr[c(289:312),14] <- 1228
+urdr[c(313:336),14] <- 643
+urdr[c(241:264),14] <- 188
+urdr[c(241:264),14] <- 188
+urdr[c(385:408),14] <- 787
+
+#9.e) check your work
+table(is.na(urdr$Nr..rooms))
+which(is.na(urdr$Nr..rooms) & is.na(urdr$Member.years))
+```
+
+
+# step 10: Drop the row counter column
+```{r}
+urdr <- urdr[,-17]
+```
+
+
+# *Model development and Implementation*
+
+## Step 1: split the data into training and test data at 70:30 for cross validation
+
+```{r}
+set.seed(134567)
+
+independent.samples = sample(2, nrow(urdr), replace = TRUE, prob = c(0.7, 0.3))
+
+train = urdr[independent.samples==1, ]
+test = urdr[independent.samples==2, ]
+```
+
+
+## Step 2: Load the random forest package
+
+Note for first time users of the random forest package: you may need to need install a gfortran program first. Since you're done with data munging, 
+
+```{r}
+library(randomForest)
+```
+
+
+## Step 3: run the randomforest algorithm
+```{r}
+set.seed(23322)
+rf = randomForest(Traveler.type~., data = train)
+print(rf) 
+
+#attributes(rf)
+#rf$confusion
+```
+
+
+## Step 4: download package caret
+
+```{r}
+library(caret)
+```
+
+
+## Step 5: evaluate predictors of the random forest model on the training data
+
+Given that I created the random forest model on the training data, I want to see how the model classifies tourists on the training data, and then applying that model to data it had never seen before, the test data.
+
+```{r}
+#5.a) get your predictions from the random forest model
+p1 <- predict(rf, train)
+
+#5.b) see how the first 6 classifiers do on training data; should be 100% identical.
+head(p1)
+head(train$Traveler.type)
+
+#5.c) create a confusion matrix using package e1071 to see
+# how the predicted results compare to the training data results.
+library(e1071)
+confusionMatrix(p1, train$Traveler.type)
+```
+
+
+## Step 6: Now build prediction of the random forest model on the test data
+
+The confusion matrix outputs indicate that the model does not do a good job at classifying test data. overall accuracy is very low at 38%. Sensitivity is very low for all tourist classes except for couples, however the specificity is close to 20% which is quite high.
+
+
+```{r}
+#6.a) build your predictions for tourist classification on test data
+p2 <- predict(rf, test)
+
+#6.b) see how well your model does on classifying via confusion matrix
+confusionMatrix(p2, test$Traveler.type)
+```
+
+
+## Step 7: Determine the error rate via graph
+
+a plot of the model can help us to re-adjust the parameters of the model, specifically the nubmer of trees needed to improve the model.
+
+All six classifications are stable by 300 trees.
+
+```{r}
+plot(rf)
+```
+
+
+## Step 8: Re-tune the random forest model using mtry
+
+mtry, or the nubmer of random variables selected to evaluate at each node in a tree, has the lowest out-of-bag error rate at mtry = 1, at below 58%.
+
+```{r}
+t <- tuneRF(train[,-6], train[,6], stepFactor = .5, plot = TRUE, ntreeTry = 300,
+       trace = TRUE, improve = .05)
+```
+
+
+## Step 9: Revise the random forest model with training data
+
+I was able to reduce the out-of-bag error down to 57.59%.
+
+```{r}
+rf2 = randomForest(Traveler.type~., data = train, ntree = 300, mtry = 1, importance = TRUE,
+                  proximity = TRUE)
+print(rf2) 
+```
+
+
+## Step 10: Evaluate how the re-tuned random forest model classified on the training data
+
+We can see that the model's overall accruacy did improve to 44%. Sensitivity for couples reach 100% and specificity to less than 1%. The remaining other classes did not have sensitivity values beyond 1%, however the model was quite good at predicting when a particualr tourist did not belong to certain class.
+
+```{r}
+p3 <- predict(rf2, train)
+confusionMatrix(p3, train$Traveler.type)
+```
+
+
+## Step 11: Evaluate how the re-tuned model classifies tourists on the test data
+
+The tuning of the model basically overfitted it by strengthening its potential to classify couples, but at the cost to all other classes.
+
+```{r}
+p4 <- predict(rf2, test)
+confusionMatrix(p4, test$Traveler.type)
+```
+
+
+## Step 12: number of nodes per tree in th rf
+
+This is a histogram representing the maximum size of each tree built in the random forest; about 70 had between 20 and 30 nodes.
+
+```{r}
+hist(treesize(rf2), main = "number of nodes for the trees", col = "green")
+```
+
+
+## step 13: Find the importance of each variable to rf2 on model accuracy and purity (gini index)
+
+Each plot measures the relative importance a particular variable has on the random forest model’s either accuracy or gini index (impurity) by measuring the model’s overall mean decrease in accuracy or mean decrease in gini-index,  across all nodes in the forest after one variable is removed from the analysis. A more extreme difference indicates a variable's importance to the model's overall accuracy or model's impurity.
+
+mean accruacy difference is defined as the difference between the out-of -bag error rate on each permuted predictor variable and the permuted out-of-bag error rate for classification on each class (response levels), averaged across all trees in the forest and normalized by the standard deviation of the differences.
+
+The gini index can be interpreted from an information perspective as a measure of impurity; high impurity indicates that classification or grouping of records fall into many distinct groupings at a node within a decision tree, leading to no new information gained. Thus the mean decrease in Gini Index measures the impurity at a given node within a tree that is splitting on a specific predictor variable, averaged over all trees.
+
+```{r}
+varImpPlot(rf2)
+
+# quantitative values of 2 measures above, for each class with respect to each attribute; values
+# used to plot points in varimplot(rf2)
+importance(rf2)
+```
+
+
+It is important to note that each table has two different interpretations. Values with extreme mean decrease accuracies indicate having extreme importance to the model's overall accuracy, while values with extreme mean decrease in gini index reveal values that bring a lot of turbidity, or impurity to the model. 
+
+We see that The number of reviews appears to be of great importance to the model while simultaneously promoting a lot if impurity. In general, the reviewer meta data further complicates the model. 
+
+The variables that promote the least mean decrease in Gini Index appear to have a mid level of importance to the model's accuracy. These variables include hotel amenities.
+
+## step 14: to see the frequency of which predictor variables are used in rf2, from var1 to 12: SKIP TRAVELR TYPE
+```{r}
+varUsed(rf2)
+```
+
+
+## step 15: Apply the partial dependence plots
+
+The partial dependence plots depict marginal effects of each variable has on a class prediction in model rf2. Conceptually, the partial dependnce plots allow one to evalaute any variables  strength in being able to classify a given class. The plots below are graphed using the following function:
+
+$$\tilde{f}(x) = \frac{1}{n} ∑_{i=1}^n f(x, x_{iC})$$
+
+where x represents the variable for which there is a dependency with classification, and $x_{iC}$ are the other variables in the data set
+
+f(x) represents the logit function for classification:
+
+$$f(x) = \log p_k(x) - \frac{1}{K} ∑_{j=1}^K \log p_j(x)$$
+
+where k is the 5 tourist classifications and $p_{j}$ is the probability that the model classifies a record into the correct class, which is the proportion of records classified correctly.
+
+This approach is somewhat similar to the asymptotic approach of the Aikakie Inoformation Criteria, which estimates the model's performance by measuring prediction error based on information gain.
+
+Because Couples were the most likely category to be classified I evalaute a few variables with respect to "Couples".
+
+### Couples choice of hotel
+
+ With respect to hotels on the strip, the second and 10th hotels, which were Ceaser's Palace and Paris Las Vegas, had the largest effect in classifying couples.
+
+```{r}
+partialPlot(rf2, test, hotel.count, "Couples")
+```
+
+
+### Length of time Couples stayed 
+
+the variable period of stay was a categorical variable that reduced the year 2015 into quarters. the time period of "Sep-Nov" was able to predict and classify couples most often, indicating a prefernce for couples to travel in the Fall months.
+
+```{r}
+partialPlot(rf2, test, Period.of.stay, "Couples")
+```
+
+
+### Distance to the LVCC
+
+The las Vegas Convention center is famous for holding large events that greatly promote tourism. We can see that for business travelers, shorter distnaces to the LVCC had a greater effect on classification compared to the couples. I can conclude that the distance was of less importance to couples. 
+
+```{r}
+par(mfrow = c(1,2))
+partialPlot(rf2, test, Distance.to.LVCC, "Business")
+partialPlot(rf2, test, Distance.to.LVCC, "Couples")
+```
+
+
+### TripAdvisor meta data
+
+Here are plotted the partial dependence plots for couples with repsect to the trip advisor review meta data. When a reviewer had about 125 and above helpful votes, about 50 reviews made in total, and a few reviews with regaurd to a specific hotel, The model was able to predict the reviewer as a "couple".
+
+it is likely then that couple tourists who write about a single trip while not being an avid reviewer on trip advisor, and whose reviews have been considered highly helpful are more likely to be considered couples.
+
+```{r}
+partialPlot(rf2, train, Helpful.votes,"Couples") #best around 10 to 50
+partialPlot(rf2, train, Nr..reviews,"Couples") # best around 1-20 and then 80 to 180...
+partialPlot(rf2, train, Nr..hotel.reviews, "Couples") # best at 1-5, and near 15, then downhill from there.
+
+```
+
+
+## step 16: extract a single tree from rf2
+
+```{r}
+getTree(rf2, 5, labelVar = TRUE)
+```
+
+
+# *Conclusion*
+The Trip Advisor Tourist Review data was intended to assess how tourists ranked hotels given both their ranking and an actual score of the hotel  rated by industry reviewers.
+
+Using the data for a different classification purpose did not prove to be successful. Of the 5 classificaiton types of tourists, the random forest model was at best able to predict Couples more than any other class. However the overall accuracy of the model was within a range of 39 to 41% accuracy. A tuning of the model only increased the model's overfitting for couples classification.
+
+Given the extreme mean decrease in Gini INdex for the meta data, and a relatively mild increase in accuracy with such variables lost, It may be worth while to perform this analysis again by excluding the the reviwer meta data. Alternatively, an Analysis of Variance model could be performed to estimate the amount of contribution of variance each meta data variable has on the classification of each tourist.'
+
+
+# *Cited Sources*
+
+Moro, S., Rita, P., & Coelho, J. (2017). Stripping customers' feedback on hotels through data mining: The case of Las Vegas Strip. Tourism Management Perspectives, 23, 41-52.
+
+
